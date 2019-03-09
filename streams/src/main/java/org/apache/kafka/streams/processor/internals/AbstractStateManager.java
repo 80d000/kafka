@@ -21,6 +21,7 @@ import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.streams.errors.StreamsException;
 import org.apache.kafka.streams.processor.StateStore;
 import org.apache.kafka.streams.state.internals.OffsetCheckpoint;
+import org.apache.kafka.streams.state.internals.RecordConverter;
 import org.slf4j.Logger;
 
 import java.io.File;
@@ -32,21 +33,30 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 
+import static org.apache.kafka.streams.state.internals.RecordConverters.identity;
+import static org.apache.kafka.streams.state.internals.RecordConverters.rawValueToTimestampedValue;
+import static org.apache.kafka.streams.state.internals.WrappedStateStore.isTimestamped;
+
 abstract class AbstractStateManager implements StateManager {
     static final String CHECKPOINT_FILE_NAME = ".checkpoint";
 
     final File baseDir;
-    final Map<TopicPartition, Long> checkpointableOffsets = new HashMap<>();
-
+    final boolean eosEnabled;
     OffsetCheckpoint checkpoint;
 
+    final Map<TopicPartition, Long> checkpointableOffsets = new HashMap<>();
     final Map<String, StateStore> stores = new LinkedHashMap<>();
     final Map<String, StateStore> globalStores = new LinkedHashMap<>();
 
-    AbstractStateManager(final File baseDir) {
+    AbstractStateManager(final File baseDir,
+                         final boolean eosEnabled) {
         this.baseDir = baseDir;
+        this.eosEnabled = eosEnabled;
         this.checkpoint = new OffsetCheckpoint(new File(baseDir, CHECKPOINT_FILE_NAME));
+    }
 
+    static RecordConverter converterForStore(final StateStore store) {
+        return isTimestamped(store) ? rawValueToTimestampedValue() : identity();
     }
 
     public void reinitializeStateStoresForPartitions(final Logger log,
@@ -62,11 +72,14 @@ abstract class AbstractStateManager implements StateManager {
             checkpointableOffsets.remove(topicPartition);
             storeToBeReinitialized.add(changelogTopicToStore.get(topicPartition.topic()));
         }
-        try {
-            checkpoint.write(checkpointableOffsets);
-        } catch (final IOException fatalException) {
-            log.error("Failed to write offset checkpoint file to {} while re-initializing {}: {}", checkpoint, stateStores, fatalException);
-            throw new StreamsException("Failed to reinitialize global store.", fatalException);
+
+        if (!eosEnabled) {
+            try {
+                checkpoint.write(checkpointableOffsets);
+            } catch (final IOException fatalException) {
+                log.error("Failed to write offset checkpoint file to {} while re-initializing {}: {}", checkpoint, stateStores, fatalException);
+                throw new StreamsException("Failed to reinitialize global store.", fatalException);
+            }
         }
 
         for (final Map.Entry<String, StateStore> entry : storesCopy.entrySet()) {
